@@ -344,31 +344,30 @@ const Settings = ({ navigation }) => {
     setRefreshing(true);
     try {
       const result = await fetchAttendanceQr();
+      // Only update searched student and not-found flag on refresh.
+      // Do NOT populate `qrRaw`/`qrText` here so pull-to-refresh
+      // doesn't automatically open the QR display. Users should
+      // explicitly press "Fetch Attendance QR" to view the QR.
       if (!result) {
         setSearchedStudent(null);
+        // leave existing qrRaw/qrText untouched; only set not-found if none shown
         if (!qrRaw && !qrText) setQrNotFound(true);
         return;
       }
 
       setSearchedStudent(result.searched || null);
-
-      if (qrRaw || qrText) {
-        if (result.result) {
-          setQrRaw(result.result.raw);
-          setQrText(result.result.pretty);
-          setQrNotFound(false);
-        } else {
-          setQrRaw(null);
-          setQrText(null);
-          setQrNotFound(true);
-        }
+      // If there is a result, mark not-found = false but don't auto-show QR
+      if (result.result) {
+        setQrNotFound(false);
       } else {
-        if (result.result) {
-          setQrNotFound(false);
-        } else {
-          setQrNotFound(true);
-        }
+        setQrNotFound(true);
       }
+      // Ensure refresh does not open or enlarge QR display
+      // Clear any displayed QR so refresh never auto-shows it
+      setQrRaw(null);
+      setQrText(null);
+      setQrEnlarged(false);
+      setShowQrData(false);
     } catch (e) {
       console.warn('[Setting] onRefresh error', e);
     } finally {
@@ -436,17 +435,17 @@ const Settings = ({ navigation }) => {
               <ActivityIndicator size="small" color={isDark ? '#fff' : '#333'} />
             ) : null}
 
-            {qrRaw && typeof qrRaw === 'string' && qrRaw.startsWith('data:') ? (
+              {qrRaw && typeof qrRaw === 'string' && qrRaw.startsWith('data:') ? (
               <TouchableOpacity activeOpacity={0.9} onPress={() => setQrEnlarged(true)}>
                 <View style={{ padding: 6, backgroundColor: '#fff', borderRadius: 8, marginBottom: 8 }}>
-                  <Image source={{ uri: qrRaw }} style={{ width: 220, height: 220 }} resizeMode="contain" />
+                  <Image source={{ uri: qrRaw }} style={{ width: 180, height: 180 }} resizeMode="contain" />
                 </View>
               </TouchableOpacity>
             ) : qrRaw && QRCodeSVG ? (
               <TouchableOpacity activeOpacity={0.9} onPress={() => setQrEnlarged(true)}>
                 <View style={{ alignItems: 'center', marginBottom: 8 }}>
                   <View style={{ padding: 6, backgroundColor: '#fff', borderRadius: 8 }}>
-                    <QRCodeSVG value={qrRaw} size={200} color="#000" backgroundColor="#fff" />
+                    <QRCodeSVG value={qrRaw} size={180} color="#000" backgroundColor="#fff" />
                   </View>
                 </View>
               </TouchableOpacity>
@@ -494,12 +493,12 @@ const Settings = ({ navigation }) => {
             <View style={styles.modalContent}>
               {qrRaw && typeof qrRaw === 'string' && qrRaw.startsWith('data:') ? (
                 <View style={{ padding: 12, backgroundColor: '#fff', borderRadius: 12 }}>
-                  <Image source={{ uri: qrRaw }} style={{ width: 340, height: 340 }} resizeMode="contain" />
+                  <Image source={{ uri: qrRaw }} style={{ width: 180, height: 180 }} resizeMode="contain" />
                 </View>
               ) : QRCodeSVG ? (
                 <View style={{ alignItems: 'center' }}>
                   <View style={{ padding: 12, backgroundColor: '#fff', borderRadius: 12 }}>
-                    <QRCodeSVG value={qrRaw} size={340} color="#000" backgroundColor="#fff" />
+                    <QRCodeSVG value={qrRaw} size={180} color="#000" backgroundColor="#fff" />
                   </View>
                 </View>
               ) : null}
@@ -522,64 +521,6 @@ const Settings = ({ navigation }) => {
           />
         </LinearGradient>
 
-        <TouchableOpacity onPress={async () => {
-          try {
-            await NotificationService.scheduleLocalNotification(
-              'Test Notification',
-              'This is a test notification from the app',
-              { type: 'test' },
-              'default'
-            );
-            Alert.alert('Test sent', 'Check your device notifications or logs.');
-          } catch (e) {
-            console.error('[Settings] Test notification error', e);
-            Alert.alert('Error', 'Failed to send test notification.');
-          }
-        }}>
-          <LinearGradient
-            colors={isDark ? ["#1e1e1e", "#121212"] : ["#ffffff", "#f4f6f9"]}
-            style={styles.item}
-          >
-            <Ionicons name="notifications" size={24} color="#2980b9" />
-            <Text style={[styles.itemText, { color: isDark ? "#fff" : "#333" }]}>Send Test Notification</Text>
-          </LinearGradient>
-        </TouchableOpacity>
-
-        <TouchableOpacity onPress={async () => {
-          try {
-            await NotificationService.checkForNewData();
-            Alert.alert('Check complete', 'Ran immediate notification check. Watch logs for results.');
-          } catch (e) {
-            console.error('[Settings] Run check error', e);
-            Alert.alert('Error', 'Failed to run check.');
-          }
-        }}>
-          <LinearGradient
-            colors={isDark ? ["#1e1e1e", "#121212"] : ["#ffffff", "#f4f6f9"]}
-            style={styles.item}
-          >
-            <Ionicons name="sync-outline" size={24} color="#16a085" />
-            <Text style={[styles.itemText, { color: isDark ? "#fff" : "#333" }]}>Run Notification Check Now</Text>
-          </LinearGradient>
-        </TouchableOpacity>
-
-        <TouchableOpacity onPress={async () => {
-          try {
-            await NotificationService.forceNotifyUpcomingEvents();
-            Alert.alert('Forced', 'Attempted to notify upcoming events. Check logs or notification tray.');
-          } catch (e) {
-            console.error('[Settings] Force notify error', e);
-            Alert.alert('Error', 'Failed to force notify events.');
-          }
-        }}>
-          <LinearGradient
-            colors={isDark ? ["#1e1e1e", "#121212"] : ["#ffffff", "#f4f6f9"]}
-            style={styles.item}
-          >
-            <Ionicons name="megaphone-outline" size={24} color="#d35400" />
-            <Text style={[styles.itemText, { color: isDark ? "#fff" : "#333" }]}>Force Notify Upcoming Events</Text>
-          </LinearGradient>
-        </TouchableOpacity>
 
         <LinearGradient
           colors={isDark ? ["#1e1e1e", "#121212"] : ["#ffffff", "#f4f6f9"]}
