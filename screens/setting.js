@@ -49,6 +49,13 @@ const Settings = ({ navigation }) => {
   // Load notification preference on mount
   useEffect(() => {
     loadNotificationPreference();
+    const focusSync = navigation.addListener('focus', () => {
+      syncNotificationState();
+    });
+
+    return () => {
+      focusSync && focusSync();
+    };
   }, []);
 
   const loadNotificationPreference = async () => {
@@ -59,6 +66,26 @@ const Settings = ({ navigation }) => {
       }
     } catch (error) {
       console.error('Error loading notification preference:', error);
+    }
+  };
+
+  // Keep the UI and AsyncStorage in sync with actual OS permission state
+  const syncNotificationState = async () => {
+    try {
+      const { status } = await Notifications.getPermissionsAsync();
+      if (status === 'granted') {
+        await AsyncStorage.setItem(NOTIFICATIONS_ENABLED_KEY, 'true');
+        setNotificationsEnabled(true);
+      } else {
+        const stored = await AsyncStorage.getItem(NOTIFICATIONS_ENABLED_KEY);
+        if (stored === 'true') {
+          // Permission was revoked externally; update UI/storage
+          await AsyncStorage.setItem(NOTIFICATIONS_ENABLED_KEY, 'false');
+          setNotificationsEnabled(false);
+        }
+      }
+    } catch (e) {
+      console.warn('[Settings] syncNotificationState error', e);
     }
   };
 
