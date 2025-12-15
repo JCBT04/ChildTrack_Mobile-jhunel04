@@ -1,0 +1,57 @@
+{
+  "expo": {
+    "name": "ChildTrack",
+    "slug": "childtrack",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/ficon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.childtrack.parentapp",
+      "infoPlist": {
+        "UIBackgroundModes": ["remote-notification"]
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/ficon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.childtrack.parentapp",
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "RECEIVE_BOOT_COMPLETED",
+        "VIBRATE",
+        "WAKE_LOCK"
+      ],
+      "useNextNotificationsApi": true
+    },
+    "web": {
+      "favicon": "./assets/ficon.png"
+    },
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/ficon.png",
+          "color": "#3498db",
+          
+          "mode": "production"
+        }
+      ]
+    ],
+    "notification": {
+      "icon": "./assets/ficon.png",
+      "color": "#3498db",
+      "androidMode": "default",
+      "androidCollapsedTitle": "ChildTrack Updates"
+    }
+  }
+}

@@ -1,0 +1,749 @@
+import React, { useState, useRef, useEffect } from "react";
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  StyleSheet,
+  Image,
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  TouchableWithoutFeedback,
+  Keyboard,
+  Platform,
+  ScrollView,
+  Alert,
+  Modal,
+} from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Ionicons } from "@expo/vector-icons";
+import { LinearGradient } from "expo-linear-gradient";
+import { useTheme } from "../components/ThemeContext";
+import * as Notifications from 'expo-notifications';
+import * as Device from 'expo-device';
+import Constants from 'expo-constants';
+
+const DEFAULT_RENDER_BACKEND_URL = "https://childtrack-backend.onrender.com/";
+const BACKEND_URL = DEFAULT_RENDER_BACKEND_URL.replace(/\/$/, "");
+
+// Configure notification handler
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+  }),
+});
+
+const Login = ({ navigation }) => {
+  const { darkModeEnabled } = useTheme();
+  const isDark = darkModeEnabled;
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [secureText, setSecureText] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
+  const [parentsLoading, setParentsLoading] = useState(false);
+  const [parentsData, setParentsData] = useState(null);
+  const [rememberMe, setRememberMe] = useState(false);
+  const [forgotModalVisible, setForgotModalVisible] = useState(false);
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetLoading, setResetLoading] = useState(false);
+  const [resetMessage, setResetMessage] = useState('');
+  const [codeModalVisible, setCodeModalVisible] = useState(false);
+  const [resetCode, setResetCode] = useState('');
+  const [resetNewPassword, setResetNewPassword] = useState('');
+  const [resetConfirmPassword, setResetConfirmPassword] = useState('');
+  const [resetSubmitting, setResetSubmitting] = useState(false);
+
+  const passwordRef = useRef(null);
+
+  // Request notification permissions and get push token
+  const requestNotificationPermission = async () => {
+    try {
+      console.log('[Login] Requesting notification permissions...');
+      
+      if (Platform.OS === 'android') {
+        await Notifications.setNotificationChannelAsync('default', {
+          name: 'default',
+          importance: Notifications.AndroidImportance.MAX,
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: '#FF231F7C',
+        });
+      }
+
+      if (!Device.isDevice) {
+        console.warn('[Login] Not a physical device, skipping push notifications');
+        return null;
+      }
+
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+
+      if (existingStatus !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+
+      if (finalStatus !== 'granted') {
+        console.warn('[Login] Notification permission denied');
+        return null;
+      }
+
+      console.log('[Login] Notification permission granted');
+
+      // Get push token
+      try {
+        const projectId = Constants?.expoConfig?.extra?.eas?.projectId ?? Constants?.easConfig?.projectId;
+        const token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
+        console.log('[Login] Push token obtained:', token);
+        return token;
+      } catch (e) {
+        console.error('[Login] Error getting push token:', e);
+        return null;
+      }
+    } catch (error) {
+      console.error('[Login] Error requesting notification permission:', error);
+      return null;
+    }
+  };
+
+  // Save push token to backend
+  const savePushTokenToBackend = async (token, parentId, authToken) => {
+    if (!token || !parentId) {
+      console.warn('[Login] Missing token or parentId, skipping push token save');
+      return;
+    }
+
+    try {
+      console.log('[Login] Saving push token to backend...');
+      const response = await fetch(`${BACKEND_URL}/api/parents/${parentId}/push-token/`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': authToken ? `Token ${authToken}` : '',
+        },
+        body: JSON.stringify({
+          push_token: token,
+          device_type: Platform.OS,
+        }),
+      });
+
+      if (response.ok) {
+        console.log('[Login] Push token saved successfully');
+        await AsyncStorage.setItem('push_token_registered', 'true');
+      } else {
+        console.warn('[Login] Failed to save push token:', response.status);
+      }
+    } catch (error) {
+      console.error('[Login] Error saving push token:', error);
+    }
+  };
+
+  const handleLogin = async () => {
+    const trimmedUsername = (username || '').trim();
+    const trimmedPassword = (password || '').trim();
+    if (!trimmedUsername || !trimmedPassword) {
+      setErrorMessage("Please fill all credentials");
+      return;
+    }
+
+    setLoading(true);
+    setErrorMessage("");
+
+    try {
+      const parentLoginUrl = `${BACKEND_URL}/api/parents/login/`;
+      const presp = await fetch(parentLoginUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: trimmedUsername, password: trimmedPassword }),
+      });
+      let pjson = null;
+      try {
+        pjson = await presp.json();
+      } catch (e) {
+        pjson = null;
+      }
+
+      console.warn('[Login] parent login response', presp.status, pjson);
+      if (!presp.ok) {
+        const serverMsg = (pjson && (pjson.error || pjson.detail)) || `HTTP ${presp.status}`;
+        setErrorMessage(serverMsg.toString());
+        setLoading(false);
+        return;
+      }
+
+      if (pjson && pjson.parent) {
+        // Persist parent object (used for offline/public flows)
+        await AsyncStorage.setItem("parent", JSON.stringify(pjson.parent));
+
+        // Store username only if user opted to remember credentials
+        if (rememberMe) {
+          await AsyncStorage.setItem("username", trimmedUsername);
+        } else {
+          // If user did not opt to remember, remove any previously saved username
+          try { await AsyncStorage.removeItem('username'); } catch (e) {}
+        }
+
+        // If user chose Remember me, also store password and token (if present)
+        if (rememberMe) {
+          // WARNING: storing plain passwords in AsyncStorage is insecure. Use encrypted storage in production.
+          await AsyncStorage.setItem("password", trimmedPassword);
+          await AsyncStorage.setItem("remember_me", "1");
+          if (pjson.token) {
+            await AsyncStorage.setItem("token", pjson.token);
+          }
+        } else {
+          // Clean up any previously stored sensitive credentials
+          await AsyncStorage.removeItem("password");
+          await AsyncStorage.removeItem("remember_me");
+          if (pjson.token) {
+            await AsyncStorage.removeItem("token");
+          }
+        }
+
+        if (pjson.parent.must_change_credentials) {
+          await AsyncStorage.setItem('parent_must_change', '1');
+        } else {
+          await AsyncStorage.removeItem('parent_must_change');
+        }
+
+        // Check if this is first login (notification permission not yet requested)
+        const hasRequestedPermission = await AsyncStorage.getItem('notification_permission_requested');
+        
+        if (!hasRequestedPermission) {
+          console.log('[Login] First login detected, requesting notification permission...');
+          
+          // Request notification permission
+          const pushToken = await requestNotificationPermission();
+          
+          // Save push token to backend if obtained
+          if (pushToken && pjson.parent.id && pjson.token) {
+            await savePushTokenToBackend(pushToken, pjson.parent.id, pjson.token);
+          }
+          
+          // Mark that we've requested permission (even if denied)
+          await AsyncStorage.setItem('notification_permission_requested', 'true');
+        } else {
+          console.log('[Login] Notification permission already requested previously');
+        }
+
+        setErrorMessage("");
+        setLoading(false);
+        
+        // Navigate after permission request
+        if (pjson.parent.must_change_credentials) {
+          navigation.navigate('profile', { forceChange: true });
+        } else {
+          navigation.navigate('home');
+        }
+        return;
+      }
+
+      try {
+        setParentsLoading(true);
+        const parents = await fetchParents(pjson && pjson.token);
+        setParentsData(parents);
+      } catch (e) {
+        console.warn("[Login] fetchParents failed", e);
+      } finally {
+        setParentsLoading(false);
+      }
+
+      setErrorMessage("");
+      navigation.navigate("home");
+    } catch (err) {
+      console.error("[Login] error", err);
+      setErrorMessage("Something went wrong");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchParents = async () => {
+    const url = `${BACKEND_URL}/api/parents/parents/`;
+    try {
+      const token = await AsyncStorage.getItem("token");
+      const headers = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Token ${token}`;
+
+      const res = await fetch(url, { method: "GET", headers });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`HTTP ${res.status}: ${text}`);
+      }
+      const data = await res.json();
+      await AsyncStorage.setItem("parents", JSON.stringify(data));
+      return data;
+    } catch (err) {
+      console.error("[fetchParents] error", err);
+      throw err;
+    }
+  };
+
+  useEffect(() => {
+    const loadSaved = async () => {
+      try {
+        const rem = await AsyncStorage.getItem("remember_me");
+        const savedUsername = await AsyncStorage.getItem("username");
+        const savedPassword = await AsyncStorage.getItem("password");
+        const token = await AsyncStorage.getItem("token");
+
+        // Only enable auto-login (navigation) when remember_me was explicitly enabled.
+        if (rem === "1") {
+          setRememberMe(true);
+          if (savedPassword) setPassword(savedPassword);
+          if (token) {
+            // replace to avoid back navigation
+            navigation.replace("home");
+            return; // prevent further UI updates
+          }
+        } else {
+          // If not remembered, remove stray saved password and username
+          if (savedPassword) {
+            try { await AsyncStorage.removeItem('password'); } catch (e) {}
+          }
+          if (savedUsername) {
+            try { await AsyncStorage.removeItem('username'); } catch (e) {}
+          }
+        }
+
+        // If a username is still present in storage (remember_me was enabled previously), prefill it
+        if (savedUsername) setUsername(savedUsername);
+      } catch (e) {
+        console.warn("[Login] loadSaved error", e);
+      }
+    };
+    loadSaved();
+  }, []);
+
+  // Toggle remember-me state and update persistent storage immediately.
+  const toggleRememberMe = async (value) => {
+    try {
+      const newVal = (typeof value === 'boolean') ? value : !rememberMe;
+      setRememberMe(newVal);
+      if (newVal) {
+        await AsyncStorage.setItem('remember_me', '1');
+      } else {
+        // clear stored sensitive credentials immediately when user unchecks
+        try {
+          await AsyncStorage.removeItem('password');
+        } catch (e) {}
+        try {
+          await AsyncStorage.removeItem('remember_me');
+        } catch (e) {}
+        try {
+          await AsyncStorage.removeItem('token');
+        } catch (e) {}
+      }
+    } catch (e) {
+      console.warn('[Login] toggleRememberMe error', e);
+    }
+  };
+
+  const requestPasswordReset = async () => {
+    const email = (resetEmail || '').trim();
+    if (!email) {
+      setResetMessage('Please enter your email');
+      return;
+    }
+    setResetLoading(true);
+    setResetMessage('');
+    try {
+      const endpoint = `${BACKEND_URL}/api/parents/password-reset/`;
+      const resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      const text = await resp.text();
+      const contentType = (resp.headers && resp.headers.get) ? (resp.headers.get('content-type') || '') : '';
+      // If server returned HTML (e.g., 404 page), avoid showing raw HTML to users.
+      const looksLikeHtml = contentType.includes('text/html') || (text && text.trim().startsWith('<'));
+      let json = null;
+      if (!looksLikeHtml) {
+        try { json = text ? JSON.parse(text) : null; } catch (e) { json = null; }
+      }
+      if (!resp.ok) {
+        if (looksLikeHtml) {
+          console.warn('[Forgot] server returned HTML error response');
+          if (resp.status === 404) {
+            setResetMessage('No account found for that email.');
+          } else {
+            setResetMessage(`Server returned an error (${resp.status}). Please try again later or contact support.`);
+          }
+        } else {
+          const msg = (json && (json.detail || json.error || json.message)) || text || `HTTP ${resp.status}`;
+          setResetMessage(msg.toString());
+        }
+        return;
+      }
+      // Success - prompt for code
+      setResetMessage((json && (json.detail || json.message)) || 'Check your email for a verification code');
+      setForgotModalVisible(false);
+      setCodeModalVisible(true);
+    } catch (err) {
+      console.error('[Forgot] error', err);
+      setResetMessage('Failed to request reset. Please try again.');
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
+  const submitPasswordReset = async () => {
+    if (!resetCode || !resetNewPassword) {
+      Alert.alert('Error', 'Please fill the code and new password');
+      return;
+    }
+    if (resetNewPassword !== resetConfirmPassword) {
+      Alert.alert('Error', 'Passwords do not match');
+      return;
+    }
+    if (resetNewPassword.length < 6) {
+      Alert.alert('Error', 'Password must be at least 6 characters');
+      return;
+    }
+    setResetSubmitting(true);
+    try {
+      const endpoint = `${BACKEND_URL}/api/parents/password-reset/confirm/`;
+      const resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: resetEmail, code: resetCode, new_password: resetNewPassword }),
+      });
+      const text = await resp.text();
+      const contentType = (resp.headers && resp.headers.get) ? (resp.headers.get('content-type') || '') : '';
+      const looksLikeHtml = contentType.includes('text/html') || (text && text.trim().startsWith('<'));
+      let json = null;
+      if (!looksLikeHtml) {
+        try { json = text ? JSON.parse(text) : null; } catch (e) { json = null; }
+      }
+      if (!resp.ok) {
+        if (looksLikeHtml) {
+          console.warn('[Reset submit] server returned HTML error response');
+          if (resp.status === 404) {
+            Alert.alert('Error', 'Reset request not found or expired. Please request a new code.');
+          } else {
+            Alert.alert('Error', `Server returned an error (${resp.status}). Please try again later or contact support.`);
+          }
+        } else {
+          const msg = (json && (json.detail || json.error || json.message)) || text || `HTTP ${resp.status}`;
+          Alert.alert('Error', msg.toString());
+        }
+        return;
+      }
+      Alert.alert('Success', 'Password changed. Please login with your new password.');
+      setCodeModalVisible(false);
+      setResetCode('');
+      setResetNewPassword('');
+      setResetConfirmPassword('');
+    } catch (err) {
+      console.error('[Reset submit] error', err);
+      Alert.alert('Error', 'Failed to change password. Please try again.');
+    } finally {
+      setResetSubmitting(false);
+    }
+  };
+
+  return (
+    <LinearGradient
+      colors={isDark ? ["#0b0f19", "#1a1f2b"] : ["#f5f5f5", "#e0e0e0"]}
+      style={styles.container}
+    >
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0}
+      >
+        <TouchableWithoutFeedback onPress={() => Keyboard.dismiss()}>
+          <ScrollView
+            contentContainerStyle={styles.scrollContent}
+            keyboardShouldPersistTaps="handled"
+            bounces={false}
+            showsVerticalScrollIndicator={false}
+          >
+            <Image
+              source={require("../assets/lg.png")}
+              style={styles.logo}
+              resizeMode="contain"
+            />
+
+            <View style={[styles.card, isDark ? styles.darkCard : styles.lightCard]}>
+              <Text style={[styles.title, isDark ? styles.darkText : styles.lightText]}>
+                Welcome Back
+              </Text>
+              <Text
+                style={[styles.subtitle, isDark ? styles.darkSubText : styles.lightSubText]}
+              >
+                Login to continue
+              </Text>
+
+              {/* Username Input */}
+              <View style={[styles.inputContainer, isDark ? styles.darkInput : styles.lightInput]}>
+                <Ionicons
+                  name="person-outline"
+                  size={20}
+                  color={isDark ? "#aaa" : "#666"}
+                  style={styles.icon}
+                />
+                <TextInput
+                  placeholder="Username"
+                  placeholderTextColor={isDark ? "#aaa" : "#666"}
+                  style={[styles.input, { color: isDark ? "#fff" : "#000" }]}
+                  value={username}
+                  onChangeText={setUsername}
+                  autoCapitalize="sentences"
+                  autoCorrect={false}
+                  returnKeyType="next"
+                  onSubmitEditing={() => passwordRef.current && passwordRef.current.focus()}
+                />
+              </View>
+
+              {/* Password Input */}
+              <View style={[styles.inputContainer, isDark ? styles.darkInput : styles.lightInput]}>
+                <Ionicons
+                  name="lock-closed-outline"
+                  size={20}
+                  color={isDark ? "#aaa" : "#666"}
+                  style={styles.icon}
+                />
+                <TextInput
+                  ref={passwordRef}
+                  placeholder="Password"
+                  placeholderTextColor={isDark ? "#aaa" : "#666"}
+                  style={[styles.input, { color: isDark ? "#fff" : "#000" }]}
+                  value={password}
+                  onChangeText={setPassword}
+                  secureTextEntry={secureText}
+                  autoCapitalize="sentences"
+                  autoCorrect={false}
+                  returnKeyType="done"
+                  onSubmitEditing={handleLogin}
+                />
+                <TouchableOpacity onPress={() => setSecureText(!secureText)} style={styles.eyeIcon}>
+                  <Ionicons
+                    name={secureText ? "eye-off-outline" : "eye-outline"}
+                    size={20}
+                    color={isDark ? "#aaa" : "#666"}
+                  />
+                </TouchableOpacity>
+              </View>
+
+              {/* Error message */}
+              {errorMessage ? (
+                <Text style={styles.errorText}>{errorMessage}</Text>
+              ) : null}
+
+              {/* Remember me checkbox */}
+              <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 10 }}>
+                <TouchableOpacity
+                  onPress={() => toggleRememberMe()}
+                  style={[
+                    styles.checkbox,
+                    isDark ? { borderColor: "#888" } : { borderColor: "#666" },
+                  ]}
+                >
+                  {rememberMe ? (
+                    <Ionicons name="checkmark" size={16} color={isDark ? "#fff" : "#000"} />
+                  ) : null}
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => toggleRememberMe()}>
+                  <Text style={[styles.rememberText, isDark ? styles.darkText : styles.lightText]}>
+                    Remember me
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              <TouchableOpacity onPress={() => setForgotModalVisible(true)} style={{ alignSelf: 'flex-end', marginBottom: 12 }}>
+                <Text style={{ color: isDark ? '#8ecaf6' : '#0277bd', fontWeight: '600' }}>Forgot password?</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity onPress={handleLogin} disabled={loading}>
+                <LinearGradient
+                  colors={isDark ? ["#0D47A1", "#1565C0"] : ["#4FC3F7", "#0288D1"]}
+                  style={styles.button}
+                >
+                  {loading ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={styles.buttonText}>Login</Text>
+                  )}
+                </LinearGradient>
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
+        </TouchableWithoutFeedback>
+      </KeyboardAvoidingView>
+      <ForgotPasswordModal
+        visible={forgotModalVisible}
+        onClose={() => setForgotModalVisible(false)}
+        email={resetEmail}
+        setEmail={setResetEmail}
+        onRequest={requestPasswordReset}
+        loading={resetLoading}
+        message={resetMessage}
+        isDark={isDark}
+      />
+
+      <CodeResetModal
+        visible={codeModalVisible}
+        onClose={() => setCodeModalVisible(false)}
+        email={resetEmail}
+        code={resetCode}
+        setCode={setResetCode}
+        newPass={resetNewPassword}
+        setNewPass={setResetNewPassword}
+        confirmPass={resetConfirmPassword}
+        setConfirmPass={setResetConfirmPassword}
+        onSubmit={submitPasswordReset}
+        loading={resetSubmitting}
+        isDark={isDark}
+      />
+    </LinearGradient>
+  );
+};
+
+// Forgot password modal components placed after main component for readability
+const ForgotPasswordModal = ({ visible, onClose, email, setEmail, onRequest, loading, message, isDark }) => (
+  <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+    <TouchableWithoutFeedback onPress={onClose}>
+      <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', padding: 20 }}>
+        <TouchableWithoutFeedback>
+          <View style={{ backgroundColor: isDark ? '#222' : '#fff', borderRadius: 12, padding: 16 }}>
+            <Text style={{ fontSize: 18, fontWeight: '700', color: isDark ? '#fff' : '#333', marginBottom: 8 }}>Reset Password</Text>
+            <Text style={{ color: isDark ? '#ddd' : '#666', marginBottom: 12 }}>Enter the email address for your account.</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', borderRadius: 8, padding: 8, backgroundColor: isDark ? '#111' : '#f6f6f6' }}>
+              <Ionicons name="mail-outline" size={18} color={isDark ? '#aaa' : '#777'} />
+              <TextInput
+                placeholder="Email"
+                placeholderTextColor={isDark ? '#888' : '#999'}
+                value={email}
+                onChangeText={setEmail}
+                style={{ marginLeft: 8, color: isDark ? '#fff' : '#000', flex: 1 }}
+                keyboardType="email-address"
+                autoCapitalize="none"
+              />
+            </View>
+            {message ? <Text style={{ color: '#f39c12', marginTop: 10 }}>{message}</Text> : null}
+            <View style={{ flexDirection: 'row', marginTop: 14 }}>
+              <TouchableOpacity onPress={onRequest} style={{ flex: 1, backgroundColor: '#0288D1', padding: 12, borderRadius: 8, alignItems: 'center', marginRight: 8 }} disabled={loading}>
+                <Text style={{ color: '#fff', fontWeight: '700' }}>{loading ? 'Sending...' : 'Send'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={onClose} style={{ flex: 1, backgroundColor: '#e0e0e0', padding: 12, borderRadius: 8, alignItems: 'center' }}>
+                <Text style={{ fontWeight: '700' }}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </TouchableWithoutFeedback>
+      </View>
+    </TouchableWithoutFeedback>
+  </Modal>
+);
+
+const CodeResetModal = ({ visible, onClose, email, code, setCode, newPass, setNewPass, confirmPass, setConfirmPass, onSubmit, loading, isDark }) => (
+  <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+    <TouchableWithoutFeedback onPress={onClose}>
+      <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', padding: 20 }}>
+        <TouchableWithoutFeedback>
+          <View style={{ backgroundColor: isDark ? '#222' : '#fff', borderRadius: 12, padding: 16 }}>
+            <Text style={{ fontSize: 18, fontWeight: '700', color: isDark ? '#fff' : '#333', marginBottom: 8 }}>Enter Verification Code</Text>
+            <Text style={{ color: isDark ? '#ddd' : '#666', marginBottom: 12 }}>Enter the code sent to your email and choose a new password.</Text>
+
+            <View style={{ marginBottom: 8 }}>
+              <TextInput placeholder="Verification code" placeholderTextColor={isDark ? '#888' : '#999'} value={code} onChangeText={setCode} style={{ backgroundColor: isDark ? '#111' : '#f6f6f6', padding: 10, borderRadius: 8, color: isDark ? '#fff' : '#000' }} />
+            </View>
+
+            <View style={{ marginBottom: 8 }}>
+              <TextInput placeholder="New password" placeholderTextColor={isDark ? '#888' : '#999'} value={newPass} onChangeText={setNewPass} secureTextEntry style={{ backgroundColor: isDark ? '#111' : '#f6f6f6', padding: 10, borderRadius: 8, color: isDark ? '#fff' : '#000' }} />
+            </View>
+
+            <View style={{ marginBottom: 8 }}>
+              <TextInput placeholder="Confirm password" placeholderTextColor={isDark ? '#888' : '#999'} value={confirmPass} onChangeText={setConfirmPass} secureTextEntry style={{ backgroundColor: isDark ? '#111' : '#f6f6f6', padding: 10, borderRadius: 8, color: isDark ? '#fff' : '#000' }} />
+            </View>
+
+            <View style={{ flexDirection: 'row', marginTop: 12 }}>
+              <TouchableOpacity onPress={onSubmit} style={{ flex: 1, backgroundColor: '#27ae60', padding: 12, borderRadius: 8, alignItems: 'center', marginRight: 8 }} disabled={loading}>
+                <Text style={{ color: '#fff', fontWeight: '700' }}>{loading ? 'Submitting...' : 'Submit'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={onClose} style={{ flex: 1, backgroundColor: '#e0e0e0', padding: 12, borderRadius: 8, alignItems: 'center' }}>
+                <Text style={{ fontWeight: '700' }}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </TouchableWithoutFeedback>
+      </View>
+    </TouchableWithoutFeedback>
+  </Modal>
+);
+
+const styles = StyleSheet.create({
+  container: { 
+    flex: 1,
+  },
+  scrollContent: {
+    flexGrow: 1,
+    justifyContent: "center",
+    paddingHorizontal: 20,
+    paddingVertical: 40,
+  },
+  logo: { 
+    width: 180, 
+    height: 180, 
+    marginBottom: 20,
+    alignSelf: "center"
+  },
+  card: { 
+    width: "100%", 
+    borderRadius: 20, 
+    padding: 25, 
+    elevation: 5, 
+    shadowColor: "#000", 
+    shadowOpacity: 0.15, 
+    shadowOffset: { width: 0, height: 5 }, 
+    shadowRadius: 10 
+  },
+  lightCard: { backgroundColor: "#fff" },
+  darkCard: { backgroundColor: "#1a1a1a" },
+  title: { fontSize: 26, fontWeight: "700" },
+  subtitle: { fontSize: 14, marginBottom: 20 },
+  inputContainer: { 
+    flexDirection: "row", 
+    alignItems: "center", 
+    width: "100%", 
+    padding: 12, 
+    borderRadius: 12, 
+    marginBottom: 15 
+  },
+  input: { flex: 1, fontSize: 16, marginLeft: 8 },
+  lightInput: { backgroundColor: "#f2f2f2" },
+  darkInput: { backgroundColor: "#2a2a2a" },
+  icon: { marginRight: 6, marginLeft: -2 },
+  eyeIcon: { position: "absolute", right: 12 },
+  button: { 
+    width: "100%", 
+    padding: 15, 
+    borderRadius: 12, 
+    alignItems: "center",
+    marginTop: 10
+  },
+  buttonText: { fontSize: 16, fontWeight: "600", color: "#fff" },
+  lightText: { color: "#000" },
+  darkText: { color: "#fff" },
+  lightSubText: { color: "#444" },
+  darkSubText: { color: "#bbb" },
+  errorText: { color: "#d32f2f", marginBottom: 15, textAlign: "center" },
+  checkbox: {
+    width: 22,
+    height: 22,
+    borderWidth: 1.5,
+    borderRadius: 4,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  rememberText: { marginLeft: 10, fontSize: 14 },
+});
+
+export default Login;
+
+// Export modals as part of default so bundlers can tree-shake if needed
+export { ForgotPasswordModal, CodeResetModal };

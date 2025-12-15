@@ -1,0 +1,571 @@
+import React, { useEffect, useState } from "react";
+import {
+  View,
+  Text,
+  StyleSheet,
+  FlatList,
+  TouchableOpacity,
+  RefreshControl,
+} from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { LinearGradient } from "expo-linear-gradient";
+import { useTheme } from "../components/ThemeContext";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+
+const DEFAULT_RENDER_BACKEND_URL = "https://childtrack-backend.onrender.com";
+const BACKEND_URL = DEFAULT_RENDER_BACKEND_URL.replace(/\/$/, "");
+const EVENTS_ENDPOINT = `${BACKEND_URL}/api/parents/events/`;
+
+const Events = ({ navigation, route }) => {
+  const { darkModeEnabled } = useTheme();
+  const isDark = darkModeEnabled;
+
+  // Color palette for events
+  const PALETTE = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#e377c2','#7f7f7f'];
+
+  const hashStringToInt = (str) => {
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h;
+  };
+
+  const mulberry32 = (a) => {
+    return function() {
+      var t = a += 0x6D2B79F5;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    }
+  };
+
+  const pickColor = (key) => {
+    const seededKey = `event:${String(key || '')}`;
+    const seed = Math.abs(hashStringToInt(seededKey));
+    const rnd = mulberry32(seed)();
+    const idx = Math.floor(rnd * PALETTE.length);
+    return PALETTE[idx];
+  };
+
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [studentSection, setStudentSection] = useState(null);
+  const [teacherName, setTeacherName] = useState(null);
+
+  const formatDate = (dateString) => {
+    if (!dateString) return 'Date not set';
+    try {
+      const date = new Date(dateString);
+      return date.toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    } catch (e) {
+      return dateString;
+    }
+  };
+
+  const loadEvents = async ({ skipLoading = false } = {}) => {
+    if (!skipLoading) setLoading(true);
+    setError(null);
+    
+    try {
+      // Get section and teacher from route params or stored parent data
+      let section = route?.params?.section || null;
+      let teacher = null;
+      
+      if (!section || !teacher) {
+        // Try to get section and teacher from stored parent data
+        const storedParent = await AsyncStorage.getItem('parent');
+        if (storedParent) {
+          try {
+            const parentData = JSON.parse(storedParent);
+            section = section || parentData.student_section || 
+                     (parentData.student && parentData.student.section) || 
+                     null;
+            teacher = parentData.teacher_name || 
+                     (parentData.teacher && parentData.teacher.name) ||
+                     parentData.student_teacher ||
+                     null;
+          } catch (e) {
+            console.warn('[Events] Failed to parse stored parent', e);
+          }
+        }
+      }
+
+      setStudentSection(section);
+      setTeacherName(teacher);
+      
+      console.log('[Events] ========== EVENT FILTERING DEBUG ==========');
+      console.log('[Events] Student section:', section);
+      console.log('[Events] Student teacher:', teacher);
+      console.log('[Events] Section type:', typeof section);
+      console.log('[Events] Teacher type:', typeof teacher);
+      console.log('[Events] Section is null/undefined:', section === null || section === undefined);
+      console.log('[Events] Teacher is null/undefined:', teacher === null || teacher === undefined);
+
+      // Get token for authentication
+      const token = await AsyncStorage.getItem('token');
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) {
+        headers['Authorization'] = `Token ${token}`;
+      }
+
+      // Fetch ALL events first (without filters in URL)
+      console.log('[Events] Fetching from:', EVENTS_ENDPOINT);
+      const response = await fetch(EVENTS_ENDPOINT, { headers });
+      console.log('[Events] Response status:', response.status);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      let data = await response.json();
+      console.log('[Events] Raw response:', data);
+
+      // Handle paginated response
+      if (data && data.results) {
+        data = data.results;
+      }
+
+      if (!Array.isArray(data)) {
+        data = [];
+      }
+
+      console.log('[Events] Total events received:', data.length);
+      
+      // Log all events with their sections and teachers for debugging
+      data.forEach((event, idx) => {
+        console.log(`[Events] Event ${idx + 1}: "${event.title}" | Section: "${event.section}" | Teacher: "${event.teacher_name}" | Type: ${typeof event.section}`);
+      });
+
+      // Get current date/time for filtering
+      const now = new Date();
+
+      // Transform and filter data
+      const transformedEvents = data
+        .map((event, idx) => ({
+          id: event.id ? String(event.id) : String(idx + 1),
+          title: event.title || 'Untitled Event',
+          date: formatDate(event.scheduled_at),
+          rawDate: event.scheduled_at,
+          description: event.description || 'No description provided',
+          location: event.location || '',
+          eventType: event.event_type || 'general',
+          icon: event.icon || 'calendar',
+          color: pickColor(event.id || event.title || idx),
+          section: event.section || null,
+          teacher: event.teacher_name || null,
+        }))
+        // CLIENT-SIDE FILTER: Filter by BOTH section AND teacher
+        .filter(event => {
+          // Check if event has no section AND no teacher (general event for everyone)
+          const isGeneralEvent = (!event.section || event.section.trim() === '') && 
+                                (!event.teacher || event.teacher.trim() === '');
+          
+          // If student has no section and no teacher, only show general events
+          if ((!section || section.trim() === '') && (!teacher || teacher.trim() === '')) {
+            console.log(`[Events] Student has NO section/teacher. Event "${event.title}" is ${isGeneralEvent ? 'GENERAL - INCLUDE' : 'SPECIFIC - EXCLUDE'}`);
+            return isGeneralEvent;
+          }
+          
+          // General events (no section AND no teacher) are visible to everyone
+          if (isGeneralEvent) {
+            console.log(`[Events] Event "${event.title}" is GENERAL EVENT - INCLUDE`);
+            return true;
+          }
+          
+          // Check section match
+          let sectionMatches = false;
+          if (!section || section.trim() === '') {
+            // Student has no section - accept events with no section
+            sectionMatches = !event.section || event.section.trim() === '';
+          } else if (!event.section || event.section.trim() === '') {
+            // Event has no section - it's section-agnostic
+            sectionMatches = true;
+          } else {
+            // Both have sections - compare them
+            sectionMatches = event.section.toLowerCase().trim() === section.toLowerCase().trim();
+          }
+          
+          // Check teacher match
+          let teacherMatches = false;
+          if (!teacher || teacher.trim() === '') {
+            // Student has no teacher - accept events with no teacher
+            teacherMatches = !event.teacher || event.teacher.trim() === '';
+          } else if (!event.teacher || event.teacher.trim() === '') {
+            // Event has no teacher - it's teacher-agnostic
+            teacherMatches = true;
+          } else {
+            // Both have teachers - compare them (case-insensitive)
+            teacherMatches = event.teacher.toLowerCase().trim() === teacher.toLowerCase().trim();
+          }
+          
+          // Event passes if BOTH section AND teacher match (or are general)
+          const passes = sectionMatches && teacherMatches;
+          
+          console.log(`[Events] Event "${event.title}" | Section: ${sectionMatches ? '✓' : '✗'} | Teacher: ${teacherMatches ? '✓' : '✗'} | Result: ${passes ? 'INCLUDE' : 'EXCLUDE'}`);
+          
+          return passes;
+        })
+        // Filter out past events - only show upcoming or today's events
+        .filter(event => {
+          if (!event.rawDate) return true; // Keep events without dates
+          const eventDate = new Date(event.rawDate);
+          if (isNaN(eventDate.getTime())) return true; // Keep invalid dates
+          
+          // Set to start of day for comparison
+          const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+          const eventStart = new Date(eventDate.getFullYear(), eventDate.getMonth(), eventDate.getDate());
+          
+          // Only show events that are today or in the future
+          return eventStart >= todayStart;
+        });
+
+      // Sort by date (soonest first)
+      transformedEvents.sort((a, b) => {
+        if (!a.rawDate) return 1;
+        if (!b.rawDate) return -1;
+        return new Date(a.rawDate) - new Date(b.rawDate);
+      });
+
+      console.log('[Events] ========== FILTERING COMPLETE ==========');
+      console.log('[Events] Final filtered events count:', transformedEvents.length);
+      console.log('[Events] Filtered events:', transformedEvents.map(e => ({ 
+        title: e.title, 
+        section: e.section || 'ANY', 
+        teacher: e.teacher || 'ANY' 
+      })));
+      console.log('[Events] ==========================================');
+
+      setEvents(transformedEvents);
+      setError(null);
+
+    } catch (err) {
+      console.error('[Events] Load failed:', err);
+      setError(err.message || 'Failed to load events');
+      setEvents([]);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadEvents();
+  }, [route?.params?.section]);
+
+  const onRefresh = async () => {
+    console.log('[Events] Refreshing...');
+    setRefreshing(true);
+    await loadEvents({ skipLoading: true });
+  };
+
+  const renderItem = ({ item }) => (
+    <TouchableOpacity
+      style={[
+        styles.card,
+        {
+          backgroundColor: isDark ? "#1e2633" : "#ffffff",
+          borderColor: isDark ? "#2d3748" : "#e1e4e8",
+          borderWidth: 1,
+        },
+      ]}
+      onPress={() => navigation.navigate("EventDetails", { event: item })}
+    >
+      <View>
+        <View style={[styles.banner, { backgroundColor: item.color }]}>
+          <Ionicons name={item.icon} size={24} color="#fff" style={styles.icon} />
+          <Text style={styles.bannerText} numberOfLines={1}>{item.title}</Text>
+        </View>
+        <View style={styles.details}>
+          <View style={styles.dateRow}>
+            <Ionicons 
+              name="calendar-outline" 
+              size={16} 
+              color={isDark ? "#a0aec0" : "#555"} 
+            />
+            <Text style={[styles.date, { color: isDark ? "#a0aec0" : "#555" }]}>
+              {item.date}
+            </Text>
+          </View>
+          
+          {item.location ? (
+            <View style={styles.locationRow}>
+              <Ionicons 
+                name="location-outline" 
+                size={16} 
+                color={isDark ? "#a0aec0" : "#555"} 
+              />
+              <Text style={[styles.location, { color: isDark ? "#a0aec0" : "#555" }]}>
+                {item.location}
+              </Text>
+            </View>
+          ) : null}
+
+          <Text 
+            style={[styles.description, { color: isDark ? "#cbd5e0" : "#666" }]} 
+            numberOfLines={2}
+          >
+            {item.description}
+          </Text>
+
+          <View style={styles.badgeContainer}>
+            {item.section ? (
+              <View style={styles.sectionBadge}>
+                <Text style={styles.sectionText}>Section {item.section}</Text>
+              </View>
+            ) : null}
+            
+            {item.teacher ? (
+              <View style={[styles.sectionBadge, { backgroundColor: 'rgba(155, 89, 182, 0.2)', marginLeft: item.section ? 8 : 0 }]}>
+                <Text style={[styles.sectionText, { color: '#9b59b6' }]}>{item.teacher}</Text>
+              </View>
+            ) : null}
+            
+            {/* Show "All Students" badge for general events (no section AND no teacher) */}
+            {!item.section && !item.teacher && (
+              <View style={[styles.sectionBadge, { backgroundColor: 'rgba(46, 204, 113, 0.2)' }]}>
+                <Text style={[styles.sectionText, { color: '#2ecc71' }]}>All Students</Text>
+              </View>
+            )}
+          </View>
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
+
+  return (
+    <LinearGradient
+      colors={isDark ? ["#0b0f19", "#1a1f2b"] : ["#f5f5f5", "#ffffff"]}
+      style={styles.container}
+    >
+      {/* Header */}
+      <View
+        style={[
+          styles.header,
+          { borderBottomColor: isDark ? "#333" : "#ddd" },
+        ]}
+      >
+        <Ionicons
+          name="arrow-back"
+          size={24}
+          color={isDark ? "#fff" : "#333"}
+          onPress={() => {
+            if (navigation.canGoBack && navigation.canGoBack()) {
+              navigation.goBack();
+            } else {
+              navigation.navigate('home');
+            }
+          }}
+        />
+        <View style={{ flex: 1, marginLeft: 12 }}>
+          <Text style={[styles.headerTitle, { color: isDark ? "#fff" : "#333" }]}>
+            Upcoming Events
+          </Text>
+          {(studentSection || teacherName) && (
+            <Text style={[styles.headerSubtitle, { color: isDark ? "#a0aec0" : "#666" }]}>
+              {studentSection && `Section ${studentSection}`}
+              {studentSection && teacherName && ' • '}
+              {teacherName}
+            </Text>
+          )}
+        </View>
+      </View>
+
+      {/* Event List */}
+      {loading ? (
+        <View style={styles.centerContent}>
+          <Text style={{ color: isDark ? '#fff' : '#333' }}>Loading events…</Text>
+        </View>
+      ) : error ? (
+        <View style={styles.centerContent}>
+          <Ionicons 
+            name="alert-circle-outline" 
+            size={48} 
+            color={isDark ? '#e74c3c' : '#c0392b'} 
+          />
+          <Text style={[styles.errorText, { color: isDark ? '#fff' : '#333' }]}>
+            {error}
+          </Text>
+          <TouchableOpacity 
+            style={styles.retryButton}
+            onPress={() => loadEvents()}
+          >
+            <Text style={styles.retryButtonText}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
+        <FlatList
+          data={events}
+          renderItem={renderItem}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={{ padding: 16 }}
+          showsVerticalScrollIndicator={false}
+          ListEmptyComponent={() => (
+            <View style={styles.emptyContainer}>
+              <Ionicons 
+                name="calendar-outline" 
+                size={64} 
+                color={isDark ? '#555' : '#ccc'} 
+              />
+              <Text style={[styles.emptyText, { color: isDark ? '#fff' : '#333' }]}>
+                No upcoming events
+              </Text>
+              {(studentSection || teacherName) && (
+                <Text style={[styles.emptySubtext, { color: isDark ? '#a0aec0' : '#666' }]}>
+                  No upcoming events for {studentSection && `Section ${studentSection}`}
+                  {studentSection && teacherName && ' with '}
+                  {teacherName}
+                </Text>
+              )}
+            </View>
+          )}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={isDark ? '#fff' : '#333'}
+              colors={[isDark ? '#fff' : '#333']}
+              progressBackgroundColor={isDark ? '#111' : '#fff'}
+            />
+          }
+        />
+      )}
+    </LinearGradient>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 16,
+    borderBottomWidth: 1,
+    marginTop: 40,
+  },
+  headerTitle: {
+    fontSize: 20,
+    fontWeight: "700",
+  },
+  headerSubtitle: {
+    fontSize: 14,
+    marginTop: 2,
+  },
+  card: {
+    borderRadius: 16,
+    marginBottom: 16,
+    elevation: 2,
+    overflow: 'hidden',
+  },
+  banner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+  },
+  bannerText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+    flex: 1,
+  },
+  details: {
+    padding: 12,
+  },
+  icon: {
+    marginRight: 12,
+  },
+  dateRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  date: {
+    fontSize: 13,
+    marginLeft: 6,
+  },
+  locationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  location: {
+    fontSize: 13,
+    marginLeft: 6,
+  },
+  description: {
+    fontSize: 14,
+    lineHeight: 20,
+    marginBottom: 8,
+  },
+  badgeContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: 4,
+  },
+  sectionBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(52, 152, 219, 0.2)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginTop: 4,
+  },
+  sectionText: {
+    color: '#3498db',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  centerContent: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  errorText: {
+    fontSize: 16,
+    marginTop: 12,
+    textAlign: 'center',
+  },
+  retryButton: {
+    marginTop: 16,
+    backgroundColor: '#3498db',
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 8,
+  },
+  retryButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  emptyContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 32,
+    minHeight: 300,
+  },
+  emptyText: {
+    fontSize: 18,
+    fontWeight: '600',
+    marginTop: 16,
+  },
+  emptySubtext: {
+    fontSize: 14,
+    marginTop: 8,
+    textAlign: 'center',
+  },
+});
+
+export default Events;
