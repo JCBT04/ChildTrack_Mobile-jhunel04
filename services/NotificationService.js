@@ -7,6 +7,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 const BACKEND_URL = "https://childtrack-backend.onrender.com";
 const POLLING_INTERVAL = 30000; // 30 seconds (changed from 5)
 const LAST_CHECK_KEY = 'notification_last_check';
+const NOTIFIED_KEY = 'notification_notified_items';
 
 // Configure notification handler
 Notifications.setNotificationHandler({
@@ -247,7 +248,11 @@ class NotificationService {
         return (matchesLrn || matchesName) && isToday;
       });
 
-      if (todayRecords.length === 0) return;
+      console.log('[NotificationService] Attendance records for today:', todayRecords.length);
+      if (todayRecords.length === 0) {
+        console.log('[NotificationService] No attendance records matched for student today.');
+        return;
+      }
 
       // Get the most recent record
       const latestRecord = todayRecords.sort((a, b) => {
@@ -256,12 +261,17 @@ class NotificationService {
         return timeB - timeA;
       })[0];
 
-      const currentIdentifier = `${latestRecord.id}-${latestRecord.status}`;
+      console.log('[NotificationService] Latest attendance record:', latestRecord);
+      const normalizedStatus = (latestRecord.status || '').toLowerCase().trim().replace(/\s|-|_/g, '');
+      console.log('[NotificationService] Normalized status:', normalizedStatus);
+
+      const currentIdentifier = `${latestRecord.id}-${normalizedStatus}`;
       const lastCheck = await this.getLastCheck('attendance');
 
       if (lastCheck !== currentIdentifier) {
+        console.log('[NotificationService] Attendance change detected. lastCheck:', lastCheck, 'current:', currentIdentifier);
         await this.saveLastCheckTimes('attendance', currentIdentifier);
-        
+
         // Only send notification if this is not the first check
         if (lastCheck !== null) {
           console.log('[NotificationService] 🔔 New attendance detected:', latestRecord.status);
@@ -269,6 +279,8 @@ class NotificationService {
         } else {
           console.log('[NotificationService] First check - skipping notification');
         }
+      } else {
+        console.log('[NotificationService] No change in attendance since last check');
       }
     } catch (error) {
       console.error('[NotificationService] Attendance check error:', error);
@@ -277,6 +289,16 @@ class NotificationService {
 
   // Send attendance notification
   async sendAttendanceNotification(record) {
+    const id = record.id || `${record.student_lrn || record.student}-${record.status}`;
+    try {
+      const already = await this.hasBeenNotified('attendance', id);
+      if (already) {
+        console.log('[NotificationService] Attendance notification already sent for', id);
+        return;
+      }
+    } catch (e) {
+      console.warn('[NotificationService] hasBeenNotified check failed', e);
+    }
     const status = (record.status || '').toLowerCase().trim().replace(/[\s_-]/g, '');
     let title = 'Attendance Update';
     let body = `${record.student_name} is in the classroom`;
@@ -304,6 +326,12 @@ class NotificationService {
       student_id: record.student_lrn,
       status: record.status,
     }, channelId);
+
+    try {
+      await this.markNotified('attendance', id);
+    } catch (e) {
+      console.warn('[NotificationService] markNotified failed for attendance', e);
+    }
   }
 
   // Check events - UPDATED WITH BETTER FILTERING
@@ -413,12 +441,28 @@ class NotificationService {
       if (lastCheck !== currentIdentifier) {
         await this.saveLastCheckTimes('events', currentIdentifier);
 
-        // Only send notification if this is not the first check
+        // If we've seen events before, notify on change. If this is the first time
+        // we run (lastCheck === null) we still want to notify if the event was
+        // created very recently (likely the user just added it).
+        const FIRST_NOTIFY_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
         if (lastCheck !== null) {
           console.log('[NotificationService] 🔔 New event detected:', newestEvent.title);
           await this.sendEventNotification(newestEvent);
         } else {
-          console.log('[NotificationService] First check - skipping notification');
+          // Determine creation time
+          let createdTime = new Date(newestEvent.created_at || newestEvent.scheduled_at || Date.now());
+          if (isNaN(createdTime.getTime())) createdTime = new Date();
+          const ageMs = Date.now() - createdTime.getTime();
+          console.log('[NotificationService] New event created_at:', (newestEvent.created_at || newestEvent.scheduled_at));
+          console.log('[NotificationService] Computed createdTime:', createdTime.toISOString(), 'ageMs:', ageMs, 'thresholdMs:', FIRST_NOTIFY_WINDOW_MS);
+
+          // Treat future timestamps (ageMs < 0) as recent and notify
+          if (ageMs <= FIRST_NOTIFY_WINDOW_MS || ageMs < 0) {
+            console.log('[NotificationService] First check but event is recent/future - sending notification:', newestEvent.title);
+            await this.sendEventNotification(newestEvent);
+          } else {
+            console.log('[NotificationService] First check - event not recent, skipping notification');
+          }
         }
       } else {
         console.log('[NotificationService] No new events detected');
@@ -430,8 +474,85 @@ class NotificationService {
     }
   }
 
+  // Force notify upcoming events (bypass last-check logic) - useful for debugging
+  async forceNotifyUpcomingEvents(parent = null) {
+    try {
+      const storedParentRaw = parent ? null : await AsyncStorage.getItem('parent');
+      if (!parent && storedParentRaw) parent = JSON.parse(storedParentRaw);
+
+      const section = parent ? (parent.student_section || parent.student?.section) : null;
+      const teacher = parent ? (parent.teacher_name || parent.student_teacher) : null;
+
+      const response = await fetch(`${BACKEND_URL}/api/parents/events/`);
+      if (!response.ok) {
+        console.log('[NotificationService] forceNotifyUpcomingEvents: Events fetch failed:', response.status);
+        return;
+      }
+      const data = await response.json();
+      const eventsList = Array.isArray(data) ? data : (data.results || []);
+
+      const now = new Date();
+      const weekFromNow = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+      const upcomingEvents = eventsList.filter(event => {
+        if (!event.scheduled_at) return false;
+        const eventDate = new Date(event.scheduled_at);
+        if (isNaN(eventDate.getTime())) return false;
+        const eventStart = new Date(eventDate.getFullYear(), eventDate.getMonth(), eventDate.getDate());
+        if (eventStart < todayStart || eventDate > weekFromNow) return false;
+
+        const isGeneralEvent = (!event.section || event.section.trim() === '') && (!event.teacher_name || event.teacher_name.trim() === '');
+        if ((!section || section.trim() === '') && (!teacher || teacher.trim() === '')) return isGeneralEvent;
+        if (isGeneralEvent) return true;
+
+        let sectionMatches = false;
+        if (!section || section.trim() === '') {
+          sectionMatches = !event.section || event.section.trim() === '';
+        } else if (!event.section || event.section.trim() === '') {
+          sectionMatches = true;
+        } else {
+          sectionMatches = event.section.toLowerCase().trim() === section.toLowerCase().trim();
+        }
+
+        let teacherMatches = false;
+        if (!teacher || teacher.trim() === '') {
+          teacherMatches = !event.teacher_name || event.teacher_name.trim() === '';
+        } else if (!event.teacher_name || event.teacher_name.trim() === '') {
+          teacherMatches = true;
+        } else {
+          teacherMatches = event.teacher_name.toLowerCase().trim() === teacher.toLowerCase().trim();
+        }
+
+        return sectionMatches && teacherMatches;
+      });
+
+      console.log('[NotificationService] forceNotifyUpcomingEvents: found', upcomingEvents.length, 'upcoming events');
+
+      for (const evt of upcomingEvents) {
+        try {
+          await this.sendEventNotification(evt);
+        } catch (e) {
+          console.warn('[NotificationService] forceNotifyUpcomingEvents: failed to send for', evt.id, e);
+        }
+      }
+    } catch (e) {
+      console.error('[NotificationService] forceNotifyUpcomingEvents error:', e);
+    }
+  }
+
   // Send event notification
   async sendEventNotification(event) {
+    const id = event.id || (`event-${event.title || ''}-${event.scheduled_at || ''}`);
+    try {
+      const already = await this.hasBeenNotified('events', id);
+      if (already) {
+        console.log('[NotificationService] Event notification already sent for', id);
+        return;
+      }
+    } catch (e) {
+      console.warn('[NotificationService] hasBeenNotified check failed', e);
+    }
     const eventDate = new Date(event.scheduled_at);
     const dateStr = eventDate.toLocaleDateString('en-US', { 
       month: 'short', 
@@ -449,6 +570,12 @@ class NotificationService {
       },
       'events'
     );
+
+    try {
+      await this.markNotified('events', id);
+    } catch (e) {
+      console.warn('[NotificationService] markNotified failed for events', e);
+    }
   }
 
   // Check guardians
@@ -491,6 +618,16 @@ class NotificationService {
 
   // Send guardian notification
   async sendGuardianNotification(guardian) {
+    const id = guardian.id || (`guardian-${guardian.name || ''}-${guardian.created_at || ''}`);
+    try {
+      const already = await this.hasBeenNotified('guardians', id);
+      if (already) {
+        console.log('[NotificationService] Guardian notification already sent for', id);
+        return;
+      }
+    } catch (e) {
+      console.warn('[NotificationService] hasBeenNotified check failed', e);
+    }
     await this.scheduleLocalNotification(
       'Guardian Approval Request',
       `${guardian.name} is requesting to be added as a guardian`,
@@ -501,6 +638,44 @@ class NotificationService {
       },
       'guardians'
     );
+
+    try {
+      await this.markNotified('guardians', id);
+    } catch (e) {
+      console.warn('[NotificationService] markNotified failed for guardians', e);
+    }
+  }
+
+  // Check if an item was already notified
+  async hasBeenNotified(type, id) {
+    try {
+      const raw = await AsyncStorage.getItem(NOTIFIED_KEY);
+      if (!raw) return false;
+      const obj = JSON.parse(raw) || {};
+      const list = Array.isArray(obj[type]) ? obj[type] : [];
+      return list.includes(String(id));
+    } catch (e) {
+      console.error('[NotificationService] Error reading notified items:', e);
+      return false;
+    }
+  }
+
+  // Mark an item as notified
+  async markNotified(type, id) {
+    try {
+      const raw = await AsyncStorage.getItem(NOTIFIED_KEY);
+      const obj = raw ? (JSON.parse(raw) || {}) : {};
+      if (!obj[type] || !Array.isArray(obj[type])) obj[type] = [];
+      const sid = String(id);
+      if (!obj[type].includes(sid)) {
+        obj[type].push(sid);
+        // Keep array reasonably small (optional): keep last 200 entries
+        if (obj[type].length > 200) obj[type] = obj[type].slice(-200);
+        await AsyncStorage.setItem(NOTIFIED_KEY, JSON.stringify(obj));
+      }
+    } catch (e) {
+      console.error('[NotificationService] Error marking notified item:', e);
+    }
   }
 
   // Setup listeners
@@ -541,10 +716,10 @@ class NotificationService {
   removeListeners() {
     console.log('[NotificationService] Removing listeners...');
     if (this.notificationListener) {
-      Notifications.removeNotificationSubscription(this.notificationListener);
+      try { this.notificationListener.remove && this.notificationListener.remove(); } catch (e) { /* ignore */ }
     }
     if (this.responseListener) {
-      Notifications.removeNotificationSubscription(this.responseListener);
+      try { this.responseListener.remove && this.responseListener.remove(); } catch (e) { /* ignore */ }
     }
     this.stopPolling();
   }
@@ -554,19 +729,27 @@ class NotificationService {
     try {
       console.log('[NotificationService] 📤 Sending notification:', title);
       
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title,
-          body,
-          data,
-          sound: true,
-          priority: Notifications.AndroidNotificationPriority.HIGH,
-        },
+      const content = {
+        title,
+        body,
+        data,
+        sound: 'default',
+      };
+
+      const options = {
+        content,
         trigger: null,
-        ...(Platform.OS === 'android' && { 
-          identifier: channelId,
-        }),
-      });
+      };
+
+      if (Platform.OS === 'android') {
+        options.android = {
+          channelId,
+          sound: 'default',
+          priority: Notifications.AndroidNotificationPriority.HIGH,
+        };
+      }
+
+      await Notifications.scheduleNotificationAsync(options);
       
       console.log('[NotificationService] ✅ Notification sent successfully');
     } catch (error) {

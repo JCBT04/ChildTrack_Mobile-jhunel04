@@ -522,6 +522,65 @@ const Settings = ({ navigation }) => {
           />
         </LinearGradient>
 
+        <TouchableOpacity onPress={async () => {
+          try {
+            await NotificationService.scheduleLocalNotification(
+              'Test Notification',
+              'This is a test notification from the app',
+              { type: 'test' },
+              'default'
+            );
+            Alert.alert('Test sent', 'Check your device notifications or logs.');
+          } catch (e) {
+            console.error('[Settings] Test notification error', e);
+            Alert.alert('Error', 'Failed to send test notification.');
+          }
+        }}>
+          <LinearGradient
+            colors={isDark ? ["#1e1e1e", "#121212"] : ["#ffffff", "#f4f6f9"]}
+            style={styles.item}
+          >
+            <Ionicons name="notifications" size={24} color="#2980b9" />
+            <Text style={[styles.itemText, { color: isDark ? "#fff" : "#333" }]}>Send Test Notification</Text>
+          </LinearGradient>
+        </TouchableOpacity>
+
+        <TouchableOpacity onPress={async () => {
+          try {
+            await NotificationService.checkForNewData();
+            Alert.alert('Check complete', 'Ran immediate notification check. Watch logs for results.');
+          } catch (e) {
+            console.error('[Settings] Run check error', e);
+            Alert.alert('Error', 'Failed to run check.');
+          }
+        }}>
+          <LinearGradient
+            colors={isDark ? ["#1e1e1e", "#121212"] : ["#ffffff", "#f4f6f9"]}
+            style={styles.item}
+          >
+            <Ionicons name="sync-outline" size={24} color="#16a085" />
+            <Text style={[styles.itemText, { color: isDark ? "#fff" : "#333" }]}>Run Notification Check Now</Text>
+          </LinearGradient>
+        </TouchableOpacity>
+
+        <TouchableOpacity onPress={async () => {
+          try {
+            await NotificationService.forceNotifyUpcomingEvents();
+            Alert.alert('Forced', 'Attempted to notify upcoming events. Check logs or notification tray.');
+          } catch (e) {
+            console.error('[Settings] Force notify error', e);
+            Alert.alert('Error', 'Failed to force notify events.');
+          }
+        }}>
+          <LinearGradient
+            colors={isDark ? ["#1e1e1e", "#121212"] : ["#ffffff", "#f4f6f9"]}
+            style={styles.item}
+          >
+            <Ionicons name="megaphone-outline" size={24} color="#d35400" />
+            <Text style={[styles.itemText, { color: isDark ? "#fff" : "#333" }]}>Force Notify Upcoming Events</Text>
+          </LinearGradient>
+        </TouchableOpacity>
+
         <LinearGradient
           colors={isDark ? ["#1e1e1e", "#121212"] : ["#ffffff", "#f4f6f9"]}
           style={styles.item}

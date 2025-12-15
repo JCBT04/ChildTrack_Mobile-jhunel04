@@ -4,7 +4,7 @@
     "slug": "childtrack",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/ficon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
@@ -16,7 +16,9 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.childtrack.parentapp",
       "infoPlist": {
-        "UIBackgroundModes": ["remote-notification"]
+        "UIBackgroundModes": [
+          "remote-notification"
+        ]
       }
     },
     "android": {
@@ -42,7 +44,6 @@
         {
           "icon": "./assets/ficon.png",
           "color": "#3498db",
-          
           "mode": "production"
         }
       ]
@@ -52,6 +53,11 @@
       "color": "#3498db",
       "androidMode": "default",
       "androidCollapsedTitle": "ChildTrack Updates"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "8f0e642d-c2aa-4cd4-89a1-94f0d2f8d480"
+      }
     }
   }
 }

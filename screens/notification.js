@@ -450,10 +450,10 @@ const NotificationsScreen = ({ navigation }) => {
     return () => {
       mounted = false;
       if (notificationListener.current) {
-        Notifications.removeNotificationSubscription(notificationListener.current);
+        try { notificationListener.current.remove && notificationListener.current.remove(); } catch (e) { /* ignore */ }
       }
       if (responseListener.current) {
-        Notifications.removeNotificationSubscription(responseListener.current);
+        try { responseListener.current.remove && responseListener.current.remove(); } catch (e) { /* ignore */ }
       }
     };
   }, []);

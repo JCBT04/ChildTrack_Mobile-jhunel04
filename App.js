@@ -1,5 +1,5 @@
 import { StatusBar } from "expo-status-bar";
-import { StyleSheet } from "react-native";
+import { StyleSheet, BackHandler, Alert } from "react-native";
 import { NavigationContainer, DefaultTheme, DarkTheme, createNavigationContainerRef } from "@react-navigation/native";
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
@@ -65,9 +65,30 @@ export default function App() {
 
     initNotifications();
 
+    // Handle Android hardware back button to avoid accidental app exit
+    const backAction = () => {
+      try {
+        if (navigationRef.isReady() && navigationRef.canGoBack()) {
+          navigationRef.goBack();
+          return true;
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      Alert.alert('Exit App', 'Do you want to exit the app?', [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Exit', onPress: () => BackHandler.exitApp() },
+      ]);
+      return true;
+    };
+
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', backAction);
+
     return () => {
       console.log('[App] Cleaning up notification service...');
       NotificationService.removeListeners();
+      backHandler.remove();
     };
   }, []);
 
